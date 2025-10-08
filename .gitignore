@@ -1,1 +1,4 @@
-/.github
+.github/
+build
+*.FBC
+*.fbc
