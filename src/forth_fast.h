@@ -51,6 +51,9 @@ typedef enum {
     OP_LT,          // Less than
     OP_GT,          // Greater than
     OP_EQ,          // Equal
+    OP_LE,          // Less than or equal <=
+    OP_GE,          // Greater than or equal >=
+    OP_NE,          // Not equal <>
     // Branches
     OP_BRANCH,      // Unconditional branch
     OP_BRANCH_IF_ZERO, // Branch if top of stack is zero
@@ -79,9 +82,18 @@ typedef enum {
     OP_ABS,         // ABS ( n -- |n| )
     OP_MIN,         // MIN ( a b -- min )
     OP_MAX_OP,      // MAX ( a b -- max )
+    OP_DIVMOD,      // /MOD ( a b -- rem quot )
+    OP_1PLUS,       // 1+ ( n -- n+1 )
+    OP_1MINUS,      // 1- ( n -- n-1 )
     // Comparisons extended
     OP_ZERO_EQ,     // 0= ( n -- flag )
     OP_ZERO_LT,     // 0< ( n -- flag )
+    OP_ZERO_NE,     // 0<> ( n -- flag )
+    // Stack extended
+    OP_QDUP,        // ?DUP ( n -- n n | 0 )
+    // Memory extended
+    OP_PLUSSTORE,   // +! ( n addr -- )
+    OP_ALLOT,       // ALLOT ( n -- ) allocate n bytes
     // I/O
     OP_EMIT,        // EMIT ( c -- )
     OP_KEY,         // KEY ( -- c )
@@ -356,6 +368,24 @@ static inline void execute(forth_t* vm, addr_t start) {
                 PUSH(vm, a == b ? -1 : 0);
                 break;
             }
+            case OP_LE: {
+                cell_t b = POP(vm);
+                cell_t a = POP(vm);
+                PUSH(vm, a <= b ? -1 : 0);
+                break;
+            }
+            case OP_GE: {
+                cell_t b = POP(vm);
+                cell_t a = POP(vm);
+                PUSH(vm, a >= b ? -1 : 0);
+                break;
+            }
+            case OP_NE: {
+                cell_t b = POP(vm);
+                cell_t a = POP(vm);
+                PUSH(vm, a != b ? -1 : 0);
+                break;
+            }
             case OP_BRANCH: {
                 addr_t target = read_addr(vm, &pc);
                 pc = target;
@@ -538,6 +568,31 @@ static inline void execute(forth_t* vm, addr_t start) {
                 PUSH(vm, a > b ? a : b);
                 break;
             }
+            case OP_DIVMOD: {
+                // /MOD ( a b -- rem quot )
+                cell_t b = POP(vm);
+                cell_t a = POP(vm);
+                if (b) {
+                    PUSH(vm, a % b);  // remainder
+                    PUSH(vm, a / b);  // quotient
+                } else {
+                    PUSH(vm, 0);
+                    PUSH(vm, 0);
+                }
+                break;
+            }
+            case OP_1PLUS: {
+                if (vm->sp > 0) {
+                    TOS(vm)++;
+                }
+                break;
+            }
+            case OP_1MINUS: {
+                if (vm->sp > 0) {
+                    TOS(vm)--;
+                }
+                break;
+            }
             
             // Comparisons extended
             case OP_ZERO_EQ: {
@@ -548,6 +603,46 @@ static inline void execute(forth_t* vm, addr_t start) {
             case OP_ZERO_LT: {
                 cell_t a = POP(vm);
                 PUSH(vm, a < 0 ? -1 : 0);
+                break;
+            }
+            case OP_ZERO_NE: {
+                cell_t a = POP(vm);
+                PUSH(vm, a != 0 ? -1 : 0);
+                break;
+            }
+            
+            // Stack extended
+            case OP_QDUP: {
+                // ?DUP ( n -- n n | 0 )
+                if (vm->sp > 0 && TOS(vm) != 0) {
+                    PUSH(vm, TOS(vm));
+                }
+                break;
+            }
+            
+            // Memory extended
+            case OP_PLUSSTORE: {
+                // +! ( n addr -- )
+                cell_t addr = POP(vm);
+                cell_t val = POP(vm);
+                if (addr >= 0 && addr + sizeof(cell_t) <= FF_DICT_SIZE) {
+                    cell_t old_val = 0;
+                    for (size_t i = 0; i < sizeof(cell_t); i++) {
+                        old_val |= ((cell_t)vm->dict[addr + i]) << (i * 8);
+                    }
+                    cell_t new_val = old_val + val;
+                    for (size_t i = 0; i < sizeof(cell_t); i++) {
+                        vm->dict[addr + i] = (new_val >> (i * 8)) & 0xFF;
+                    }
+                }
+                break;
+            }
+            case OP_ALLOT: {
+                // ALLOT ( n -- ) allocate n bytes in dictionary
+                cell_t n = POP(vm);
+                if (n > 0 && vm->here + n <= FF_DICT_SIZE) {
+                    vm->here += n;
+                }
                 break;
             }
             
@@ -765,6 +860,49 @@ static int interpret_line(forth_t* vm, const char* line) {
         // Handle BYE/QUIT/EXIT - exit the REPL
         if (strcmp(t, "BYE") == 0 || strcmp(t, "QUIT") == 0 || strcmp(t, "EXIT") == 0) {
             exit(0);
+        }
+        
+        // Handle CONSTANT - create a constant
+        if (strcmp(t, "CONSTANT") == 0) {
+            p = next_token(vm, p);
+            if (!p) {
+                fprintf(stderr, "CONSTANT needs a name\n");
+                return 0;
+            }
+            // Value is on stack
+            if (vm->sp < 1) {
+                fprintf(stderr, "CONSTANT needs a value on stack\n");
+                return 0;
+            }
+            cell_t val = POP(vm);
+            // Create a word that pushes the constant value
+            addr_t word_addr = vm->here;
+            emit_byte(vm, OP_LIT);
+            emit_cell(vm, val);
+            emit_byte(vm, OP_EXIT);
+            add_word(vm, vm->token, word_addr);
+            continue;
+        }
+        
+        // Handle VARIABLE - create a variable
+        if (strcmp(t, "VARIABLE") == 0) {
+            p = next_token(vm, p);
+            if (!p) {
+                fprintf(stderr, "VARIABLE needs a name\n");
+                return 0;
+            }
+            // Allocate space in dictionary for one cell
+            addr_t var_addr = vm->here;
+            for (int i = 0; i < (int)sizeof(cell_t); i++) {
+                emit_byte(vm, 0);
+            }
+            // Create a word that pushes the variable's address
+            addr_t word_addr = vm->here;
+            emit_byte(vm, OP_LIT);
+            emit_cell(vm, var_addr);
+            emit_byte(vm, OP_EXIT);
+            add_word(vm, vm->token, word_addr);
+            continue;
         }
         
         // Handle SEE - decompile a word
@@ -1213,6 +1351,42 @@ static int interpret_line(forth_t* vm, const char* line) {
             continue;
         }
         
+        // Handle BEGIN (compile-only)
+        if (strcmp(t, "BEGIN") == 0) {
+            if (!vm->compiling) {
+                fprintf(stderr, "BEGIN only works in compilation mode\n");
+                return 0;
+            }
+            vm->cstack[vm->csp++] = vm->here;  // Mark loop start
+            continue;
+        }
+        
+        // Handle WHILE (compile-only)
+        if (strcmp(t, "WHILE") == 0) {
+            if (!vm->compiling || vm->csp == 0) {
+                fprintf(stderr, "WHILE without BEGIN\n");
+                return 0;
+            }
+            emit_byte(vm, OP_BRANCH_IF_ZERO);  // Exit loop if TOS is false (zero)
+            vm->cstack[vm->csp++] = vm->here;  // Save location to patch for exit
+            emit_addr(vm, 0);  // Placeholder for exit address
+            continue;
+        }
+        
+        // Handle REPEAT (compile-only)
+        if (strcmp(t, "REPEAT") == 0) {
+            if (!vm->compiling || vm->csp < 2) {
+                fprintf(stderr, "REPEAT without BEGIN/WHILE\n");
+                return 0;
+            }
+            addr_t while_addr = vm->cstack[--vm->csp];  // WHILE's branch location
+            addr_t begin_addr = vm->cstack[--vm->csp];  // BEGIN location
+            emit_byte(vm, OP_BRANCH);  // Unconditional jump back to BEGIN
+            emit_addr(vm, begin_addr);
+            patch_addr(vm, while_addr, vm->here);  // WHILE exits to here
+            continue;
+        }
+        
         // Interpret/compile token
         if (!interpret_token(vm, t)) {
             fprintf(stderr, "? %s\n", t);
@@ -1328,6 +1502,21 @@ static void init_forth(forth_t* vm) {
     emit_byte(vm, OP_EXIT);
     add_word(vm, "=", addr);
     
+    addr = vm->here;
+    emit_byte(vm, OP_LE);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "<=", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_GE);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, ">=", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_NE);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "<>", addr);
+    
     // Memory operations
     addr = vm->here;
     emit_byte(vm, OP_LOAD);
@@ -1423,6 +1612,21 @@ static void init_forth(forth_t* vm) {
     emit_byte(vm, OP_EXIT);
     add_word(vm, "MAX", addr);
     
+    addr = vm->here;
+    emit_byte(vm, OP_DIVMOD);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "/MOD", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_1PLUS);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "1+", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_1MINUS);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "1-", addr);
+    
     // Comparisons extended
     addr = vm->here;
     emit_byte(vm, OP_ZERO_EQ);
@@ -1433,6 +1637,28 @@ static void init_forth(forth_t* vm) {
     emit_byte(vm, OP_ZERO_LT);
     emit_byte(vm, OP_EXIT);
     add_word(vm, "0<", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_ZERO_NE);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "0<>", addr);
+    
+    // Stack extended
+    addr = vm->here;
+    emit_byte(vm, OP_QDUP);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "?DUP", addr);
+    
+    // Memory extended
+    addr = vm->here;
+    emit_byte(vm, OP_PLUSSTORE);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "+!", addr);
+    
+    addr = vm->here;
+    emit_byte(vm, OP_ALLOT);
+    emit_byte(vm, OP_EXIT);
+    add_word(vm, "ALLOT", addr);
     
     // I/O
     addr = vm->here;

@@ -16,5 +16,4 @@
 \ Least common multiple: a b -- lcm
 : LCM   ( a b -- lcm ) 2DUP GCD / * ;
 
-\ Fibonacci
-: FIBONACCI  ( n -- fib ) DUP 2 < IF DROP 1 ELSE DUP 1 - FIBONACCI SWAP 2 - FIBONACCI + THEN ;
+: IN-RANGE? ( n low high -- flag ) ROT DUP ROT >= SWAP ROT <= AND ;
